@@ -1,0 +1,5 @@
+fastapi>=0.115,<1
+uvicorn[standard]>=0.34,<1
+yt-dlp[default]>=2025.1.15
+faster-whisper>=1.2,<2
+httpx[socks]>=0.28,<1
