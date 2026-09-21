@@ -73,6 +73,18 @@ export default function App() {
 
   const activeOptions = mode === "video" ? qualities : formatOptions[mode];
 
+  const downloadHref = useMemo(() => {
+    if (!source) return "#";
+    const encodedUrl = encodeURIComponent(source.webpage_url);
+    if (mode === "video") {
+      return apiUrl(`/api/download/video?url=${encodedUrl}&quality=${option.replace("p", "")}`);
+    } else if (mode === "audio") {
+      return apiUrl(`/api/download/audio?url=${encodedUrl}&bitrate=${option.replace(" kbps", "")}`);
+    } else {
+      return apiUrl(`/api/transcribe?url=${encodedUrl}&language=${language}&output_format=${option.toLowerCase()}`);
+    }
+  }, [source, mode, option, language]);
+
   function handleModeChange(nextMode) {
     setMode(nextMode);
     setOption(nextMode === "video" ? qualities[0] : formatOptions[nextMode][0]);
@@ -119,25 +131,14 @@ export default function App() {
 
   function startDownload() {
     setDownloading(true);
-    const encodedUrl = encodeURIComponent(source.webpage_url);
-    let downloadUrl;
     if (mode === "video") {
-      downloadUrl = `/api/download/video?url=${encodedUrl}&quality=${option.replace("p", "")}`;
-      setNotice("MP4 готовится. Большое видео может занять несколько минут — не закрывайте окно терминала.");
+      setNotice("MP4 готовится. Большое видео может занять несколько минут — не закрывайте окно терминала и текущую вкладку.");
     } else if (mode === "audio") {
-      downloadUrl = `/api/download/audio?url=${encodedUrl}&bitrate=${option.replace(" kbps", "")}`;
-      setNotice("Извлекаем аудиодорожку и создаём MP3.");
+      setNotice("MP3 извлекается из клипа. Обработка может занять время в зависимости от размера видео — не закрывайте вкладку.");
     } else {
-      downloadUrl = `/api/transcribe?url=${encodedUrl}&language=${language}&output_format=${option.toLowerCase()}`;
-      setNotice("Распознаём речь локально. При первом запуске модель загрузится автоматически, поэтому потребуется больше времени.");
+      setNotice("Распознаём речь локально. При первом запуске модель загрузится автоматически, поэтому потребуется больше времени. Не закрывайте текущую вкладку.");
     }
-    const anchor = document.createElement("a");
-    anchor.href = apiUrl(downloadUrl);
-    anchor.style.display = "none";
-    document.body.appendChild(anchor);
-    anchor.click();
-    anchor.remove();
-    window.setTimeout(() => setDownloading(false), 2500);
+    window.setTimeout(() => setDownloading(false), 6000);
   }
 
   function resetResult() {
@@ -160,7 +161,7 @@ export default function App() {
         </a>
         <div className="topbar-meta">
           <span className="status-pill"><i /> {isOnline ? "ONLINE" : "LOCAL MODE"}</span>
-          <span className="version">V1.1</span>
+          <span className="version">V1.2</span>
         </div>
       </header>
 
@@ -256,9 +257,9 @@ export default function App() {
                   <p><strong>{mode === "transcript" ? "Локальное распознавание" : "Без искусственного удаления знаков"}</strong><span>{mode === "transcript" ? "Аудио обрабатывается на вашем компьютере и удаляется после выдачи файла." : "Берём чистый исходный поток, когда он доступен. Вшитый водяной знак не стирается и не обрезается."}</span></p>
                 </div>
 
-                <button className="primary-action" type="button" onClick={startDownload} disabled={downloading}>
+                <a className="primary-action" href={downloadHref} download onClick={(e) => { if (downloading) e.preventDefault(); else startDownload(); }} aria-disabled={downloading}>
                   {downloading ? "Обрабатываем" : mode === "video" ? "Скачать MP4" : mode === "audio" ? "Скачать MP3" : "Создать расшифровку"}<span>{option}</span>{downloading ? <span className="spinner dark" /> : <AppIcon name="arrow" />}
-                </button>
+                </a>
                 {notice && <div className="backend-notice">{notice}</div>}
               </div>
             </div>
@@ -288,9 +289,10 @@ export default function App() {
 
       <footer>
         <div className="footer-brand"><span className="brand-symbol small"><span /></span>Video Toolbox</div>
-        <span>Final v1.0 · React + FastAPI</span>
+        <span>Final v1.2 · React + FastAPI</span>
         <span>MP4 · MP3 · TXT/SRT/VTT</span>
       </footer>
     </div>
   );
 }
+
