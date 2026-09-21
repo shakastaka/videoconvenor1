@@ -21,7 +21,7 @@ from pydantic import BaseModel, HttpUrl
 from starlette.background import BackgroundTask
 
 
-APP_VERSION = "0.5.0"
+APP_VERSION = "0.6.0"
 MAX_CONCURRENT_DOWNLOADS = int(os.getenv("MAX_CONCURRENT_DOWNLOADS", "2"))
 MAX_FILESIZE = int(os.getenv("MAX_FILESIZE_BYTES", str(2 * 1024**3)))
 MAX_DURATION_SECONDS = int(os.getenv("MAX_DURATION_SECONDS", str(2 * 60 * 60)))
@@ -99,6 +99,17 @@ def _friendly_error(error: Exception) -> HTTPException:
     elif "unsupported url" in lowered:
         message = "Этот источник пока не поддерживается."
     return HTTPException(status_code=422, detail=message)
+
+
+def _is_tiktok_url(raw_url: str) -> bool:
+    hostname = (urlsplit(raw_url).hostname or "").lower()
+    return "tiktok" in hostname
+
+
+def _audio_format_selector(raw_url: str) -> str:
+    if _is_tiktok_url(raw_url):
+        return "bestvideo*[acodec!=none]/best[acodec!=none]/best"
+    return "bestaudio/best"
 
 
 def _has_watermark(format_info: dict[str, Any]) -> bool:
@@ -238,7 +249,7 @@ def _download_video(raw_url: str, target_height: int, directory: Path) -> tuple[
 def _download_audio(raw_url: str, bitrate: int, directory: Path) -> tuple[Path, str]:
     _extract_metadata(raw_url)
     options = {
-        "format": "bestaudio/best",
+        "format": _audio_format_selector(raw_url),
         "outtmpl": str(directory / "audio.%(ext)s"),
         "quiet": True,
         "noprogress": True,
@@ -268,7 +279,7 @@ def _download_audio(raw_url: str, bitrate: int, directory: Path) -> tuple[Path, 
 def _download_audio_for_transcription(raw_url: str, directory: Path) -> tuple[Path, str]:
     _extract_metadata(raw_url, MAX_TRANSCRIPTION_DURATION_SECONDS)
     options = {
-        "format": "bestaudio/best",
+        "format": _audio_format_selector(raw_url),
         "outtmpl": str(directory / "speech.%(ext)s"),
         "quiet": True,
         "noprogress": True,
@@ -305,22 +316,25 @@ def _timestamp(seconds: float, separator: str = ",") -> str:
     return f"{hours:02}:{minutes:02}:{secs:02}{separator}{millis:03}"
 
 
+def _non_blank_segments(segments: list[Any]) -> list[Any]:
+    return [segment for segment in segments if segment.text and segment.text.strip()]
+
+
 def _render_transcript(segments: list[Any], output_format: str) -> str:
+    segments = _non_blank_segments(segments)
     if output_format == "txt":
-        return "\n".join(segment.text.strip() for segment in segments if segment.text.strip()) + "\n"
+        return "\n".join(segment.text.strip() for segment in segments) + "\n"
     if output_format == "vtt":
         blocks = ["WEBVTT", ""]
         for segment in segments:
             text = segment.text.strip()
-            if text:
-                blocks.extend([f"{_timestamp(segment.start, '.')} --> {_timestamp(segment.end, '.')}", text, ""])
+            blocks.extend([f"{_timestamp(segment.start, '.')} --> {_timestamp(segment.end, '.')}", text, ""])
         return "\n".join(blocks)
 
     blocks = []
     for index, segment in enumerate(segments, start=1):
         text = segment.text.strip()
-        if text:
-            blocks.extend([str(index), f"{_timestamp(segment.start)} --> {_timestamp(segment.end)}", text, ""])
+        blocks.extend([str(index), f"{_timestamp(segment.start)} --> {_timestamp(segment.end)}", text, ""])
     return "\n".join(blocks)
 
 
@@ -335,12 +349,28 @@ def _transcribe(raw_url: str, language: str, output_format: str, directory: Path
         vad_filter=True,
         condition_on_previous_text=True,
     )
-    segments = list(segment_stream)
+    segments = _non_blank_segments(list(segment_stream))
+    detected_language = info.language
+
+    if not segments:
+        segment_stream, info = model.transcribe(
+            str(audio),
+            language=selected_language,
+            beam_size=5,
+            vad_filter=False,
+            condition_on_previous_text=True,
+        )
+        segments = _non_blank_segments(list(segment_stream))
+        detected_language = info.language
+
+    if not segments:
+        raise ValueError("Не удалось распознать речь в этом видео")
+
     transcript = _render_transcript(segments, output_format)
     output = directory / f"transcript.{output_format}"
     output.write_text(transcript, encoding="utf-8")
     filename = _safe_filename(title).removesuffix(".mp4") + f".{output_format}"
-    return output, filename, info.language
+    return output, filename, detected_language
 
 
 @app.get("/health")
@@ -382,6 +412,11 @@ async def download_video(
             path=output,
             media_type="video/mp4",
             filename=filename,
+            headers={
+                "Content-Type": "application/octet-stream",
+                "Cache-Control": "no-store",
+                "X-Content-Type-Options": "nosniff",
+            },
             background=BackgroundTask(shutil.rmtree, directory, ignore_errors=True),
         )
     except Exception as error:
@@ -410,6 +445,11 @@ async def download_audio(
             path=output,
             media_type="audio/mpeg",
             filename=filename,
+            headers={
+                "Content-Type": "application/octet-stream",
+                "Cache-Control": "no-store",
+                "X-Content-Type-Options": "nosniff",
+            },
             background=BackgroundTask(shutil.rmtree, directory, ignore_errors=True),
         )
     except Exception as error:
@@ -439,7 +479,12 @@ async def transcribe_video(
             path=output,
             media_type="text/plain; charset=utf-8",
             filename=filename,
-            headers={"X-Detected-Language": detected_language},
+            headers={
+                "X-Detected-Language": detected_language,
+                "Content-Type": "application/octet-stream",
+                "Cache-Control": "no-store",
+                "X-Content-Type-Options": "nosniff",
+            },
             background=BackgroundTask(shutil.rmtree, directory, ignore_errors=True),
         )
     except Exception as error:
