@@ -148,6 +148,12 @@ def _extract_metadata(raw_url: str, max_duration_seconds: int = MAX_DURATION_SEC
     return info
 
 
+def _is_tiktok(info: dict[str, Any]) -> bool:
+    extractor_key = str(info.get("extractor_key") or "").lower()
+    webpage_url = str(info.get("webpage_url") or "").lower()
+    return "tiktok" in extractor_key or "tiktok" in webpage_url
+
+
 def _metadata_payload(raw_url: str) -> dict[str, Any]:
     info = _extract_metadata(raw_url)
     formats = _usable_video_formats(info)
@@ -197,12 +203,6 @@ def _choose_format(info: dict[str, Any], target_height: int) -> str:
     return f"{video_format['format_id']}+{audio_format['format_id']}"
 
 
-def _is_tiktok(info: dict[str, Any]) -> bool:
-    extractor_key = str(info.get("extractor_key") or "").lower()
-    webpage_url = str(info.get("webpage_url") or "").lower()
-    return "tiktok" in extractor_key or "tiktok" in webpage_url
-
-
 def _choose_audio_source(info: dict[str, Any]) -> str:
     if _is_tiktok(info):
         formats = info.get("formats") or []
@@ -211,7 +211,7 @@ def _choose_audio_source(info: dict[str, Any]) -> str:
             for item in formats
             if item.get("vcodec") not in {None, "none"}
             and item.get("acodec") not in {None, "none"}
-            and item.get("has_drm") is False
+            and not item.get("has_drm")
         ]
         if audio_formats:
             best_format = max(audio_formats, key=lambda item: _format_score(item, 1080, True))
@@ -259,7 +259,6 @@ def _download_video(raw_url: str, target_height: int, directory: Path) -> tuple[
 
 
 def _download_audio(raw_url: str, bitrate: int, directory: Path) -> tuple[Path, str]:
-    _extract_metadata(raw_url)
     metadata = _extract_metadata(raw_url)
     options = {
         "format": _choose_audio_source(metadata),
@@ -290,7 +289,6 @@ def _download_audio(raw_url: str, bitrate: int, directory: Path) -> tuple[Path, 
 
 
 def _download_audio_for_transcription(raw_url: str, directory: Path) -> tuple[Path, str]:
-    _extract_metadata(raw_url, MAX_TRANSCRIPTION_DURATION_SECONDS)
     metadata = _extract_metadata(raw_url, MAX_TRANSCRIPTION_DURATION_SECONDS)
     options = {
         "format": _choose_audio_source(metadata),
@@ -494,3 +492,4 @@ async def transcribe_video(
 FRONTEND_DIST = Path(__file__).resolve().parent.parent / "frontend" / "dist"
 if FRONTEND_DIST.is_dir():
     app.mount("/", StaticFiles(directory=FRONTEND_DIST, html=True), name="frontend")
+
