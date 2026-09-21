@@ -21,7 +21,7 @@ from pydantic import BaseModel, HttpUrl
 from starlette.background import BackgroundTask
 
 
-APP_VERSION = "0.5.0"
+APP_VERSION = "0.6.0"
 MAX_CONCURRENT_DOWNLOADS = int(os.getenv("MAX_CONCURRENT_DOWNLOADS", "2"))
 MAX_FILESIZE = int(os.getenv("MAX_FILESIZE_BYTES", str(2 * 1024**3)))
 MAX_DURATION_SECONDS = int(os.getenv("MAX_DURATION_SECONDS", str(2 * 60 * 60)))
@@ -197,6 +197,29 @@ def _choose_format(info: dict[str, Any], target_height: int) -> str:
     return f"{video_format['format_id']}+{audio_format['format_id']}"
 
 
+def _is_tiktok(info: dict[str, Any]) -> bool:
+    extractor_key = str(info.get("extractor_key") or "").lower()
+    webpage_url = str(info.get("webpage_url") or "").lower()
+    return "tiktok" in extractor_key or "tiktok" in webpage_url
+
+
+def _choose_audio_source(info: dict[str, Any]) -> str:
+    if _is_tiktok(info):
+        formats = info.get("formats") or []
+        audio_formats = [
+            item
+            for item in formats
+            if item.get("vcodec") not in {None, "none"}
+            and item.get("acodec") not in {None, "none"}
+            and item.get("has_drm") is False
+        ]
+        if audio_formats:
+            best_format = max(audio_formats, key=lambda item: _format_score(item, 1080, True))
+            return str(best_format["format_id"])
+        return "bestvideo*[acodec!=none]/best[acodec!=none]/best"
+    return "bestaudio/best"
+
+
 def _safe_filename(title: str) -> str:
     cleaned = re.sub(r"[^\w\-. ()\[\]]+", "_", title, flags=re.UNICODE).strip(" ._")
     return f"{(cleaned or 'video')[:120]}.mp4"
@@ -237,8 +260,9 @@ def _download_video(raw_url: str, target_height: int, directory: Path) -> tuple[
 
 def _download_audio(raw_url: str, bitrate: int, directory: Path) -> tuple[Path, str]:
     _extract_metadata(raw_url)
+    metadata = _extract_metadata(raw_url)
     options = {
-        "format": "bestaudio/best",
+        "format": _choose_audio_source(metadata),
         "outtmpl": str(directory / "audio.%(ext)s"),
         "quiet": True,
         "noprogress": True,
@@ -267,8 +291,9 @@ def _download_audio(raw_url: str, bitrate: int, directory: Path) -> tuple[Path, 
 
 def _download_audio_for_transcription(raw_url: str, directory: Path) -> tuple[Path, str]:
     _extract_metadata(raw_url, MAX_TRANSCRIPTION_DURATION_SECONDS)
+    metadata = _extract_metadata(raw_url, MAX_TRANSCRIPTION_DURATION_SECONDS)
     options = {
-        "format": "bestaudio/best",
+        "format": _choose_audio_source(metadata),
         "outtmpl": str(directory / "speech.%(ext)s"),
         "quiet": True,
         "noprogress": True,
@@ -335,7 +360,18 @@ def _transcribe(raw_url: str, language: str, output_format: str, directory: Path
         vad_filter=True,
         condition_on_previous_text=True,
     )
-    segments = list(segment_stream)
+    segments = [s for s in segment_stream if s.text.strip()]
+    if not segments:
+        segment_stream, info = model.transcribe(
+            str(audio),
+            language=selected_language,
+            beam_size=5,
+            vad_filter=False,
+            condition_on_previous_text=False,
+        )
+        segments = [s for s in segment_stream if s.text.strip()]
+    if not segments:
+        raise ValueError("В этом видео не обнаружена речь или она не распознана. Проверьте качество звука и исходный язык.")
     transcript = _render_transcript(segments, output_format)
     output = directory / f"transcript.{output_format}"
     output.write_text(transcript, encoding="utf-8")
@@ -380,8 +416,9 @@ async def download_video(
             output, filename = await asyncio.to_thread(_download_video, raw_url, quality, directory)
         return FileResponse(
             path=output,
-            media_type="video/mp4",
+            media_type="application/octet-stream",
             filename=filename,
+            headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"},
             background=BackgroundTask(shutil.rmtree, directory, ignore_errors=True),
         )
     except Exception as error:
@@ -408,8 +445,9 @@ async def download_audio(
             output, filename = await asyncio.to_thread(_download_audio, raw_url, bitrate, directory)
         return FileResponse(
             path=output,
-            media_type="audio/mpeg",
+            media_type="application/octet-stream",
             filename=filename,
+            headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"},
             background=BackgroundTask(shutil.rmtree, directory, ignore_errors=True),
         )
     except Exception as error:
@@ -437,9 +475,13 @@ async def transcribe_video(
             )
         return FileResponse(
             path=output,
-            media_type="text/plain; charset=utf-8",
+            media_type="application/octet-stream",
             filename=filename,
-            headers={"X-Detected-Language": detected_language},
+            headers={
+                "Cache-Control": "no-store",
+                "X-Content-Type-Options": "nosniff",
+                "X-Detected-Language": detected_language,
+            },
             background=BackgroundTask(shutil.rmtree, directory, ignore_errors=True),
         )
     except Exception as error:
